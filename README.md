@@ -13,7 +13,7 @@ A Chrome extension that adds award and cash prices to JAL award calendars.
 3. Run `npm run build`.
 4. Open `chrome://extensions`.
 5. Turn on **Developer mode**.
-6. Choose **Load unpacked** and select `.output/chrome-mv3`.
+6. Choose **Load unpacked** and select `dist/chrome-mv3`.
 
 ## Use
 

@@ -2,6 +2,7 @@ import { defineConfig } from "wxt";
 
 export default defineConfig({
   srcDir: "src",
+  outDir: "dist",
   manifest: {
     name: "JAL Award Helper",
     short_name: "JAL Helper",

@@ -22,6 +22,11 @@
   font-weight: 700;
 }
 
+jal-calendar-bound-date-desktop .cell[aria-checked="true"] .jal-helper-price-label,
+jal-calendar-bound-date-desktop .cell:hover .jal-helper-price-label {
+  color: #fff;
+}
+
 .jal-helper-price-value {
   color: #111827;
   font-weight: 700;

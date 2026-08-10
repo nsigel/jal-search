@@ -1,7 +1,7 @@
 import { chromium, expect, test, type BrowserContext, type Worker } from "@playwright/test";
 import path from "node:path";
 
-const extensionPath = path.resolve(".output/chrome-mv3");
+const extensionPath = path.resolve("dist/chrome-mv3");
 const awardUrl =
   "https://book-i.jal.co.jp/JLInt/dyn/air/booking/availability;JAL_SESSION_ID=award-session";
 const otpUrl =
