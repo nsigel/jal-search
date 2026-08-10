@@ -11,6 +11,9 @@ const otpRevenueUrl =
 
 test("preflights revenue auth, completes it in the background, then loads award and cash rows", async ({}, testInfo) => {
   const events: string[] = [];
+  let revenueBootstrap: URLSearchParams | undefined;
+  let freshAwardBootstrap: URLSearchParams | undefined;
+  let awardSessionRequest: URLSearchParams | undefined;
   const { context, serviceWorker, extensionId } = await launchExtension(testInfo.outputPath("profile"));
   await addBookingToken(context);
 
@@ -33,6 +36,7 @@ test("preflights revenue auth, completes it in the background, then loads award 
     if (!request.url().includes("JAL_SESSION_ID=")) {
       const params = new URLSearchParams(body);
       if (params.get("FLOW_MODE") === "REDEMPTION") {
+        freshAwardBootstrap = params;
         expect(params.get("ENC")).toBe("e2e-token");
         expect(params.get("ENCT")).toBe("2");
         expect(params.get("CFF_1")).toBe("9JE");
@@ -45,6 +49,7 @@ test("preflights revenue auth, completes it in the background, then loads award 
         });
         return;
       }
+      revenueBootstrap = params;
       events.push("revenue-bootstrap");
       expect(body).toContain("FLOW_MODE=REVENUE");
       expect(body).toContain("IS_FLEXIBLE=TRUE");
@@ -58,7 +63,19 @@ test("preflights revenue auth, completes it in the background, then loads award 
     }
 
     if (request.method() === "POST") {
-      const cabin = new URLSearchParams(body).get("CFF_OUTBOUND") || "9YE";
+      const params = new URLSearchParams(body);
+      awardSessionRequest = params;
+      expect(params.get("FLOW_MODE")).toBe("REDEMPTION");
+      expect(params.get("DEVICE_TYPE")).toBe("desktop");
+      expect(params.get("FORCE_OVERRIDE")).toBe("TRUE");
+      expect(params.get("WDS_USER_TRAVELLING")).toBe("true");
+      expect(params.get("STREAM")).toBe("booking");
+      expect(params.get("DDS_FROM_PAGE")).toBe("ODCL");
+      expect(params.get("DEPARTURE_LOCATION_1")).toBe("NYC");
+      expect(params.get("ARRIVAL_LOCATION_1")).toBe("TYO");
+      expect(params.get("SIMULTANEOUS_UPGRADE")).toBe("FALSE");
+      expect(params.has("ENC")).toBe(false);
+      const cabin = params.get("CFF_OUTBOUND") || "9YE";
       events.push(`award-${cabin}`);
       await route.fulfill({
         status: 200,
@@ -121,6 +138,7 @@ test("preflights revenue auth, completes it in the background, then loads award 
   await expect(panel.locator(".jal-helper-status")).toHaveText("Fares ready.");
   await expect(panel.locator(".jal-helper-status")).toHaveAttribute("data-loading", "false");
   await expect(panel.locator(".jal-helper-status")).toHaveCSS("background-color", "rgb(238, 246, 241)");
+  expect(context.pages().filter((page) => page.url().startsWith("https://jallogin.jal.co.jp/")).length).toBe(0);
   await awardPage.screenshot({
     path: testInfo.outputPath("award-calendar.png"),
     animations: "disabled"
@@ -165,6 +183,42 @@ test("preflights revenue auth, completes it in the background, then loads award 
   expect(recentBody.get("ENCT")).toBe("2");
   expect(recentBody.get("DIRECT_NON_STOP")).toBe("TRUE");
   await expect.poll(() => events).toContain("fresh-award-search");
+
+  const bootstrapFields = [
+    "SITE",
+    "LANGUAGE",
+    "COUNTRY_SITE",
+    "ENC",
+    "ENCT",
+    "DEVICE_TYPE",
+    "PATTERN",
+    "NB_ADT",
+    "NB_YADT",
+    "NB_CHD",
+    "NB_INF",
+    "IS_FLEXIBLE",
+    "DIRECT_NON_STOP",
+    "SIMULTANEOUS_UPGRADE",
+    "SEARCH_CASSETTE_ID",
+    "WDS_PROMO_CODE"
+  ];
+  expect(revenueBootstrap).toBeDefined();
+  expect(freshAwardBootstrap).toBeDefined();
+  for (const field of bootstrapFields) {
+    expect(freshAwardBootstrap?.has(field), `award bootstrap field: ${field}`).toBe(
+      revenueBootstrap?.has(field)
+    );
+  }
+  expect(freshAwardBootstrap?.get("ENC")).toBe(revenueBootstrap?.get("ENC"));
+  expect(freshAwardBootstrap?.get("ENCT")).toBe(revenueBootstrap?.get("ENCT"));
+  expect(freshAwardBootstrap?.get("DEVICE_TYPE")).toBe(revenueBootstrap?.get("DEVICE_TYPE"));
+  expect(freshAwardBootstrap?.get("FLOW_MODE")).toBe("REDEMPTION");
+  expect(revenueBootstrap?.get("FLOW_MODE")).toBe("REVENUE");
+  expect(freshAwardBootstrap?.get("CFF_1")).toBe("9JE");
+  expect(revenueBootstrap?.get("CFF_1")).toBe("1YE");
+  expect(freshAwardBootstrap?.has("CFF_OUTBOUND")).toBe(false);
+  expect(revenueBootstrap?.has("CFF_OUTBOUND")).toBe(false);
+  expect(awardSessionRequest).toBeDefined();
 
   await context.close();
 });
@@ -329,7 +383,12 @@ function bookingPage(
             NB_ADT: "1",
             NB_CHD: "0",
             NB_INF: "0",
-            DIRECT_NON_STOP: "FALSE"
+            DIRECT_NON_STOP: "FALSE",
+            ENC: "stale-token",
+            ENCT: "2",
+            SIMULTANEOUS_UPGRADE: "FALSE",
+            SEARCH_CASSETTE_ID: "",
+            WDS_PROMO_CODE: ""
           }
         },
         context: {

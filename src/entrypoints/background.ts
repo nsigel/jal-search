@@ -5,6 +5,7 @@ import {
   REVENUE_SESSION_KEY,
   REVENUE_STATUS_KEY,
   PriceMap,
+  RevenueProbeResult,
   RevenueSearch,
   RevenueSession,
   availabilityUrl,
@@ -20,7 +21,8 @@ type PendingAuth = {
   id: string;
   search: RevenueSearch;
   awardTabId: number;
-  authTabId: number;
+  authTabId?: number;
+  probeFrameId?: number;
 };
 
 type RevenuePage = {
@@ -55,6 +57,18 @@ export default defineBackground(() => {
   browser.tabs.onUpdated.addListener((tabId, { url }) => {
     if (url?.startsWith("https://jallogin.jal.co.jp/")) void revealLogin(tabId);
   });
+  // The probe stays in the award tab. JAL blocks the login document in a frame,
+  // so navigation events give us the exact handoff point for the top-level tab.
+  const loginNavigationFilter = { url: [{ hostEquals: "jallogin.jal.co.jp" }] };
+  browser.webNavigation.onCommitted.addListener((details) => {
+    if (details.frameId > 0) void handleProbeNavigation(details);
+  }, loginNavigationFilter);
+  browser.webNavigation.onErrorOccurred.addListener((details) => {
+    if (details.frameId > 0) void handleProbeNavigation(details);
+  }, loginNavigationFilter);
+  browser.webNavigation.onBeforeNavigate.addListener((details) => {
+    if (details.frameId > 0) void handleProbeNavigation(details);
+  }, { url: [{ hostEquals: "book-i.jal.co.jp" }] });
   browser.tabs.onRemoved.addListener((tabId) => {
     if (tabId === closingTab) {
       closingTab = undefined;
@@ -85,22 +99,50 @@ async function prepareRevenue(search: RevenueSearch, awardTabId: number) {
     }
   }
 
-  await beginAuth(search, awardTabId);
-  return { status: "authenticating" as const };
+  const probe = await beginProbe(search, awardTabId);
+  if (probe.status === "ready") {
+    const result = await finishRevenue(probe, search);
+    await browser.storage.session.remove(REVENUE_AUTH_KEY);
+    await setStatus("ready", "Cash-fare access is ready.");
+    return { status: "ready" as const, prices: result.prices };
+  }
+  if (probe.status === "auth-required") {
+    const auth = await getAuth();
+    if (!auth || auth.authTabId != null) return { status: "error" as const };
+    await beginAuth(auth);
+    return { status: "authenticating" as const };
+  }
+  if (probe.status === "cancelled") return { status: "cancelled" as const };
+  await failAuth(probe.message);
+  return { status: "error" as const, message: probe.message };
 }
 
-async function beginAuth(search: RevenueSearch, awardTabId: number) {
+async function beginProbe(search: RevenueSearch, awardTabId: number): Promise<RevenueProbeResult> {
+  const auth: PendingAuth = {
+    id: crypto.randomUUID(),
+    search,
+    awardTabId
+  };
+  await browser.storage.session.set({ [REVENUE_AUTH_KEY]: auth });
+  const result = (await browser.tabs.sendMessage(awardTabId, {
+    type: "jal:revenue-probe",
+    id: auth.id,
+    search
+  }).catch((error) => ({
+    status: "error" as const,
+    message: error instanceof Error ? error.message : String(error)
+  }))) as RevenueProbeResult;
+  return result;
+}
+
+async function beginAuth(auth: PendingAuth) {
   await setStatus("authenticating", "Establishing cash-fare access with JAL…");
   const tab = await browser.tabs.create({ active: false, url: "about:blank" });
   if (tab.id == null) throw new Error("JAL authentication tab could not be created.");
 
-  const auth: PendingAuth = {
-    id: crypto.randomUUID(),
-    search,
-    awardTabId,
-    authTabId: tab.id
-  };
-  await browser.storage.session.set({ [REVENUE_AUTH_KEY]: auth });
+  await browser.storage.session.set({
+    [REVENUE_AUTH_KEY]: { ...auth, authTabId: tab.id }
+  });
   await browser.tabs.update(tab.id, {
     url: `https://www.jal.co.jp/ar/en/${REVENUE_AUTH_HASH}${encodeURIComponent(auth.id)}`
   });
@@ -113,13 +155,15 @@ async function authForTab(id: string, tabId?: number) {
 
 async function completeAuth(message: RevenuePage, tabId?: number) {
   const auth = await getAuth();
-  if (!auth || auth.authTabId !== tabId || !message.session?.sessionId) return;
+  if (
+    !auth ||
+    auth.authTabId == null ||
+    auth.authTabId !== tabId ||
+    !message.session?.sessionId
+  ) return;
 
   try {
-    const result = Object.keys(message.prices).length
-      ? message
-      : await enqueue(() => fetchRevenueCalendar(message.session, auth.search));
-    await browser.storage.local.set({ [REVENUE_SESSION_KEY]: result.session });
+    const result = await finishRevenue(message, auth.search);
     await browser.storage.session.remove(REVENUE_AUTH_KEY);
     await setStatus("ready", "Cash-fare access is ready.");
     await browser.tabs.sendMessage(auth.awardTabId, {
@@ -132,6 +176,14 @@ async function completeAuth(message: RevenuePage, tabId?: number) {
   } catch (error) {
     await failAuth(error instanceof Error ? error.message : String(error));
   }
+}
+
+async function finishRevenue(message: RevenuePage, search: RevenueSearch): Promise<RevenuePage> {
+  const result = Object.keys(message.prices).length
+    ? message
+    : await enqueue(() => fetchRevenueCalendar(message.session, search));
+  await browser.storage.local.set({ [REVENUE_SESSION_KEY]: result.session });
+  return result;
 }
 
 async function fetchRevenueCalendar(session: RevenueSession, search: RevenueSearch) {
@@ -163,13 +215,37 @@ async function fetchRevenueCalendar(session: RevenueSession, search: RevenueSear
 }
 
 async function revealLogin(tabId: number) {
-  await new Promise((resolve) => setTimeout(resolve, 2_000));
   const auth = await getAuth();
   if (auth?.authTabId !== tabId) return;
   const tab = await browser.tabs.get(tabId).catch(() => null);
   if (!tab?.url?.startsWith("https://jallogin.jal.co.jp/")) return;
   await browser.tabs.update(tabId, { active: true });
   await setStatus("authenticating", "Complete JAL verification in the authentication tab.");
+}
+
+async function handleProbeNavigation(details: { tabId: number; frameId: number; url: string }) {
+  const auth = await getAuth();
+  if (!auth || auth.authTabId != null || auth.awardTabId !== details.tabId) return;
+
+  const url = new URL(details.url);
+  if (
+    url.hostname === "book-i.jal.co.jp" &&
+    url.pathname === "/JLInt/dyn/air/booking/availability"
+  ) {
+    if (auth.probeFrameId == null) {
+      await browser.storage.session.set({
+        [REVENUE_AUTH_KEY]: { ...auth, probeFrameId: details.frameId }
+      });
+    }
+    return;
+  }
+
+  if (url.hostname !== "jallogin.jal.co.jp") return;
+  if (auth.probeFrameId !== details.frameId) return;
+  await browser.tabs.sendMessage(details.tabId, {
+    type: "jal:revenue-probe-auth-required",
+    id: auth.id
+  }).catch(() => undefined);
 }
 
 async function authClosed(tabId: number) {
@@ -195,7 +271,13 @@ async function cancelAuth() {
   const auth = await getAuth();
   await browser.storage.session.remove(REVENUE_AUTH_KEY);
   await setStatus("idle", "Cash comparison is off.");
-  if (auth) {
+  if (auth?.authTabId == null && auth) {
+    await browser.tabs.sendMessage(auth.awardTabId, {
+      type: "jal:cancel-revenue-probe",
+      id: auth.id
+    }).catch(() => undefined);
+  }
+  if (auth?.authTabId != null) {
     closingTab = auth.authTabId;
     await browser.tabs.remove(auth.authTabId).catch(() => undefined);
   }

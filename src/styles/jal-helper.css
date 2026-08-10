@@ -1,3 +1,8 @@
+/* JAL repeats this badge in every populated award cell; the amount is enough. */
+jal-calendar-bound-date-desktop img.inline-img.lowest {
+  display: none !important;
+}
+
 .jal-helper-cell-prices {
   display: grid;
   gap: 2px;
@@ -22,9 +27,9 @@
   font-weight: 700;
 }
 
-jal-calendar-bound-date-desktop .cell[aria-checked="true"] .jal-helper-price-label,
-jal-calendar-bound-date-desktop .cell:hover .jal-helper-price-label {
-  color: #fff;
+td.lower-price.selected .jal-helper-price-label,
+td.lower-price:hover .jal-helper-price-label {
+  color: #fff !important;
 }
 
 .jal-helper-price-value {

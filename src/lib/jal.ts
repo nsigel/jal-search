@@ -15,6 +15,12 @@ export type RevenueSession = {
   params: Params;
 };
 
+export type RevenueProbeResult =
+  | { status: "ready"; session: RevenueSession; prices: PriceMap }
+  | { status: "auth-required" }
+  | { status: "cancelled" }
+  | { status: "error"; message: string };
+
 export type SearchContext = RevenueSearch & {
   sessionId: string;
   cabins: Array<{ code: string; label: string }>;
@@ -157,6 +163,19 @@ export function pageError(data: JalData, fallback: string): string | null {
 }
 
 export function buildRevenueBootstrap(search: RevenueSearch, encryptionKey: string): URLSearchParams {
+  return buildBootstrap(search, encryptionKey, "REVENUE", cashCabin(search.cabinCode));
+}
+
+export function buildAwardBootstrap(search: RevenueSearch, encryptionKey: string): URLSearchParams {
+  return buildBootstrap(search, encryptionKey, "REDEMPTION", search.cabinCode);
+}
+
+function buildBootstrap(
+  search: RevenueSearch,
+  encryptionKey: string,
+  flowMode: "REVENUE" | "REDEMPTION",
+  cabinCode: string
+): URLSearchParams {
   const source = search.params;
   const request = new URLSearchParams({
     SITE: source.SITE || "J019J019",
@@ -165,12 +184,12 @@ export function buildRevenueBootstrap(search: RevenueSearch, encryptionKey: stri
     ENC: encryptionKey,
     ENCT: "2",
     DEVICE_TYPE: "DESKTOP",
-    FLOW_MODE: "REVENUE",
+    FLOW_MODE: flowMode,
     PATTERN: source.PATTERN || "1B",
     DEPARTURE_LOCATION_1: search.origin.toUpperCase(),
     ARRIVAL_LOCATION_1: search.destination.toUpperCase(),
     DEPARTURE_DATE_1: search.departureDate,
-    CFF_1: cashCabin(search.cabinCode),
+    CFF_1: cabinCode,
     NB_ADT: source.NB_ADT || "1",
     NB_YADT: source.NB_YADT || "",
     NB_CHD: source.NB_CHD || "0",
@@ -196,26 +215,35 @@ export function buildRevenueBootstrap(search: RevenueSearch, encryptionKey: stri
   return request;
 }
 
-export function buildAwardBootstrap(search: RevenueSearch, encryptionKey: string): URLSearchParams {
-  const request = buildRevenueBootstrap(search, encryptionKey);
-  request.set("FLOW_MODE", "REDEMPTION");
-  request.set("CFF_1", search.cabinCode);
-  return request;
-}
-
 export function buildRevenueCalendar(
   session: RevenueSession,
   search: RevenueSearch,
   fromPage: string
 ): URLSearchParams {
-  const request = new URLSearchParams(session.params);
+  return buildSessionRequest(
+    session.params,
+    search,
+    "REVENUE",
+    cashCabin(search.cabinCode),
+    fromPage
+  );
+}
+
+function buildSessionRequest(
+  params: Params,
+  search: RevenueSearch,
+  flowMode: "REVENUE" | "REDEMPTION",
+  cabinCode: string,
+  fromPage: string
+): URLSearchParams {
+  const request = new URLSearchParams(params);
   const source = search.params;
   request.set("SITE", source.SITE || request.get("SITE") || "J019J019");
   request.set("LANGUAGE", source.LANGUAGE || request.get("LANGUAGE") || "GB");
   request.set("COUNTRY_SITE", source.COUNTRY_SITE || request.get("COUNTRY_SITE") || "JAL_AR_US");
   request.set("DEVICE_TYPE", "desktop");
   request.set("FORCE_OVERRIDE", "TRUE");
-  request.set("FLOW_MODE", "REVENUE");
+  request.set("FLOW_MODE", flowMode);
   request.set("WDS_USER_TRAVELLING", "true");
   request.set("STREAM", "booking");
   request.set("PATTERN", source.PATTERN || request.get("PATTERN") || "1B");
@@ -225,39 +253,33 @@ export function buildRevenueCalendar(
   request.set("NB_INF", source.NB_INF || "0");
   request.set("IS_FLEXIBLE", "TRUE");
   request.set("DIRECT_NON_STOP", source.DIRECT_NON_STOP || "FALSE");
+  request.set(
+    "SIMULTANEOUS_UPGRADE",
+    source.SIMULTANEOUS_UPGRADE || request.get("SIMULTANEOUS_UPGRADE") || "FALSE"
+  );
+  request.set(
+    "SEARCH_CASSETTE_ID",
+    source.SEARCH_CASSETTE_ID || request.get("SEARCH_CASSETTE_ID") || ""
+  );
+  request.set("WDS_PROMO_CODE", source.WDS_PROMO_CODE || request.get("WDS_PROMO_CODE") || "");
   request.set("DDS_FROM_PAGE", fromPage);
   request.set("DEPARTURE_LOCATION_1", search.origin.toUpperCase());
   request.set("ARRIVAL_LOCATION_1", search.destination.toUpperCase());
   request.set("DEPARTURE_DATE_1", search.departureDate);
   request.delete("CFF_1");
-  request.set("CFF_OUTBOUND", cashCabin(search.cabinCode));
+  request.set("CFF_OUTBOUND", cabinCode);
   request.delete("ENC");
   return request;
 }
 
 export function buildAwardSearch(search: RevenueSearch): URLSearchParams {
-  const request = new URLSearchParams(search.params);
-  request.set("COUNTRY_SITE", request.get("COUNTRY_SITE") || "JAL_AR_US");
-  request.set("LANGUAGE", request.get("LANGUAGE") || "GB");
-  request.set("SITE", request.get("SITE") || "J019J019");
-  request.set("DEVICE_TYPE", "desktop");
-  request.set("FORCE_OVERRIDE", "TRUE");
-  request.set("FLOW_MODE", "REDEMPTION");
-  request.set("WDS_USER_TRAVELLING", "true");
-  request.set("STREAM", "booking");
-  request.set("NB_YADT", request.get("NB_YADT") || "");
-  request.set("NB_ADT", request.get("NB_ADT") || "1");
-  request.set("NB_CHD", request.get("NB_CHD") || "0");
-  request.set("NB_INF", request.get("NB_INF") || "0");
-  request.set("PATTERN", request.get("PATTERN") || "1B");
-  request.set("IS_FLEXIBLE", "TRUE");
-  request.set("DIRECT_NON_STOP", request.get("DIRECT_NON_STOP") || "FALSE");
-  request.set("DDS_FROM_PAGE", "ODCL");
-  request.set("DEPARTURE_LOCATION_1", search.origin);
-  request.set("ARRIVAL_LOCATION_1", search.destination);
-  request.set("DEPARTURE_DATE_1", search.departureDate);
-  request.delete("CFF_1");
-  request.set("CFF_OUTBOUND", search.cabinCode);
+  const request = buildSessionRequest(
+    search.params,
+    search,
+    "REDEMPTION",
+    search.cabinCode,
+    "ODCL"
+  );
   request.set("DEPARTURE_AREA_1", request.get("DEPARTURE_AREA_1") || "");
   request.set("ARRIVAL_AREA_1", request.get("ARRIVAL_AREA_1") || "");
   return request;

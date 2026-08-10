@@ -7,7 +7,7 @@ export default defineConfig({
     name: "JAL Award Helper",
     short_name: "JAL Helper",
     description: "Adds cabin and cash calendar context to JAL award searches.",
-    permissions: ["storage"],
+    permissions: ["storage", "webNavigation"],
     host_permissions: [
       "https://book-i.jal.co.jp/*",
       "https://www.jal.co.jp/*",

@@ -3,6 +3,7 @@ import {
   REVENUE_AUTH_HASH,
   JalData,
   PriceMap,
+  RevenueProbeResult,
   RevenueSearch,
   SearchContext,
   availabilityUrl,
@@ -20,6 +21,7 @@ import "../styles/jal-helper.css";
 
 const CACHE_TTL = 6 * 60 * 60 * 1000;
 const REQUEST_GAP = 900;
+const REVENUE_PROBE_TIMEOUT = 30_000;
 const RECENT_SEARCHES_KEY = "jal-recent-searches";
 const inFlight = new Map<string, Promise<PriceMap>>();
 let queue: Promise<void> = Promise.resolve();
@@ -28,6 +30,11 @@ let runId = 0;
 let context: SearchContext | null = null;
 let awards: Record<string, PriceMap> = {};
 let cash: PriceMap | undefined;
+
+let activeRevenueProbe: {
+  id: string;
+  finish: (result: RevenueProbeResult) => void;
+} | null = null;
 
 export default defineContentScript({
   matches: ["https://book-i.jal.co.jp/*", "https://www.jal.co.jp/*"],
@@ -61,26 +68,145 @@ export default defineContentScript({
     }
     awards = { [context.cabinCode]: parsePrices(data) };
     mountPanel(context, await remember(context));
+    registerRuntimeMessages();
     await compare(context);
 
     browser.storage.onChanged.addListener((changes, area) => {
       if (area === "local" && changes[COMPARE_CASH_KEY] && context) void compare(context);
     });
-    browser.runtime.onMessage.addListener(async (raw: unknown) => {
-      const message = raw as { type?: string; prices?: PriceMap; message?: string };
-      if (message.type === "jal:revenue-auth-failed") {
-        setPanelStatus(message.message || "Cash-fare authentication failed.", false, true);
-        return;
-      }
-      if (message.type !== "jal:revenue-ready" || !message.prices || !context) return;
-      const enabled = (await browser.storage.local.get(COMPARE_CASH_KEY))[COMPARE_CASH_KEY] !== false;
-      if (!enabled) return;
-      cash = message.prices;
-      setPanelStatus("Loading fare classes…", true);
-      await loadAwards(context, ++runId, true);
-    });
   }
 });
+
+function registerRuntimeMessages() {
+  browser.runtime.onMessage.addListener(async (raw: unknown) => {
+    const message = raw as {
+      type?: string;
+      id?: string;
+      search?: RevenueSearch;
+      prices?: PriceMap;
+      message?: string;
+    };
+    if (message.type === "jal:revenue-probe") {
+      if (!message.id || !message.search) {
+        return { status: "error" as const, message: "The revenue probe request was incomplete." };
+      }
+      return probeRevenue(message.id, message.search);
+    }
+    if (message.type === "jal:revenue-probe-auth-required") {
+      const probe = activeRevenueProbe;
+      if (probe && probe.id === message.id) probe.finish({ status: "auth-required" });
+      return;
+    }
+    if (message.type === "jal:cancel-revenue-probe") {
+      const probe = activeRevenueProbe;
+      if (probe && probe.id === message.id) {
+        probe.finish({ status: "cancelled" });
+        setPanelStatus("Cash comparison is off.", false);
+      }
+      return;
+    }
+    if (message.type === "jal:revenue-auth-failed") {
+      setPanelStatus(message.message || "Cash-fare authentication failed.", false, true);
+      return;
+    }
+    if (message.type !== "jal:revenue-ready" || !message.prices || !context) return;
+    const enabled = (await browser.storage.local.get(COMPARE_CASH_KEY))[COMPARE_CASH_KEY] !== false;
+    if (!enabled) return;
+    cash = message.prices;
+    setPanelStatus("Loading fare classes…", true);
+    await loadAwards(context, ++runId, true);
+  });
+}
+
+async function probeRevenue(id: string, search: RevenueSearch): Promise<RevenueProbeResult> {
+  if (activeRevenueProbe) {
+    return { status: "error", message: "Another JAL revenue request is already running." };
+  }
+
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let frame: HTMLIFrameElement | undefined;
+  let form: HTMLFormElement | undefined;
+  let resolveProbe: ((result: RevenueProbeResult) => void) | undefined;
+
+  const result = new Promise<RevenueProbeResult>((resolve) => {
+    resolveProbe = resolve;
+  });
+  const finish = (response: RevenueProbeResult) => {
+    if (activeRevenueProbe?.id !== id) return;
+    if (timer) clearTimeout(timer);
+    form?.remove();
+    frame?.remove();
+    activeRevenueProbe = null;
+    resolveProbe?.(response);
+  };
+  activeRevenueProbe = { id, finish };
+
+  const inspect = () => {
+    const data = frame?.contentDocument ? parseJalData(frame.contentDocument) : null;
+    if (!data) return;
+    if (!isRevenue(data)) {
+      finish({
+        status: "error",
+        message: pageError(data, "JAL returned a non-revenue response.") ||
+          "JAL returned a non-revenue response."
+      });
+      return;
+    }
+    if (!data.jsessionid) {
+      finish({ status: "error", message: "JAL returned a revenue page without a session." });
+      return;
+    }
+    const error = pageError(data, "JAL revenue bootstrap returned an error.");
+    if (error) {
+      finish({ status: "error", message: error });
+      return;
+    }
+    finish({
+      status: "ready",
+      session: { sessionId: data.jsessionid, params: jalParams(data) },
+      prices: parsePrices(data)
+    });
+  };
+
+  try {
+    const token = await bookingToken();
+    if (activeRevenueProbe?.id !== id) return result;
+
+    // Same-origin with the award page: JAL's Lax cookies are sent and a
+    // successful revenue document is readable. An OTP redirect is not.
+    frame = document.createElement("iframe");
+    frame.name = `jal-helper-revenue-probe-${id}`;
+    frame.style.cssText =
+      "position:fixed;left:-10000px;top:-10000px;width:1px;height:1px;border:0;opacity:0;pointer-events:none;";
+    frame.addEventListener("load", inspect);
+    document.body.append(frame);
+
+    form = document.createElement("form");
+    form.method = "POST";
+    form.action = availabilityUrl();
+    form.target = frame.name;
+    form.hidden = true;
+    for (const [name, value] of buildRevenueBootstrap(search, token)) {
+      const input = document.createElement("input");
+      input.type = "hidden";
+      input.name = name;
+      input.value = value;
+      form.append(input);
+    }
+    document.body.append(form);
+    form.submit();
+    timer = setTimeout(() => {
+      finish({ status: "error", message: "JAL revenue bootstrap did not complete." });
+    }, REVENUE_PROBE_TIMEOUT);
+  } catch (error) {
+    finish({
+      status: "error",
+      message: error instanceof Error ? error.message : String(error)
+    });
+  }
+
+  return result;
+}
 
 async function startRevenueAuth() {
   const id = decodeURIComponent(location.hash.slice(REVENUE_AUTH_HASH.length));
@@ -132,8 +258,16 @@ async function compare(search: SearchContext) {
     const response = (await browser.runtime.sendMessage({
       type: "jal:prepare-revenue",
       search
-    })) as { status?: string; prices?: PriceMap };
+    })) as { status?: string; prices?: PriceMap; message?: string };
     if (currentRun !== runId) return;
+    if (response.status === "error") {
+      setPanelStatus(response.message || "Cash-fare access failed.", false, true);
+      return;
+    }
+    if (response.status === "cancelled") {
+      setPanelStatus("Cash comparison is off.", false);
+      return;
+    }
     if (response.status !== "ready" || !response.prices) {
       setPanelStatus("Waiting for JAL verification…", true);
       return;
@@ -343,15 +477,19 @@ async function submitRecent(event: SubmitEvent, search: RevenueSearch) {
 }
 
 async function bookingToken(): Promise<string> {
-  await fetch(`https://www.jal.co.jp/cgi-bin/jal/common_rn/getEnc1A.cgi?_${Date.now()}`, {
-    credentials: "include",
-    cache: "no-store"
-  });
-  const token = document.cookie
-    .split(";")
+  const read = () => document.cookie.split(";")
     .map((part) => part.trim())
     .find((part) => part.startsWith("enc1A="))
     ?.slice(6);
+  let token = read();
+  if (!token) {
+    await fetch(`https://www.jal.co.jp/cgi-bin/jal/common_rn/getEnc1A.cgi?_${Date.now()}`, {
+      credentials: "include",
+      cache: "no-store",
+      mode: "no-cors"
+    });
+    token = read();
+  }
   if (!token) throw new Error("JAL did not issue its booking token.");
   return decodeURIComponent(token);
 }
