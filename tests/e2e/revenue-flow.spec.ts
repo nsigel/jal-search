@@ -12,6 +12,7 @@ const otpRevenueUrl =
 test("preflights revenue auth, completes it in the background, then loads award and cash rows", async ({}, testInfo) => {
   const events: string[] = [];
   let revenueBootstrap: URLSearchParams | undefined;
+  let revenueCalendarRequest: URLSearchParams | undefined;
   let freshAwardBootstrap: URLSearchParams | undefined;
   let awardSessionRequest: URLSearchParams | undefined;
   const { context, serviceWorker, extensionId } = await launchExtension(testInfo.outputPath("profile"));
@@ -54,6 +55,22 @@ test("preflights revenue auth, completes it in the background, then loads award 
       expect(body).toContain("FLOW_MODE=REVENUE");
       expect(body).toContain("IS_FLEXIBLE=TRUE");
       await new Promise((resolve) => setTimeout(resolve, 500));
+      await route.fulfill({
+        status: 200,
+        contentType: "text/html",
+        body: bookingPage("REVENUE", "revenue-session", "1YE", { cash: 1234 })
+      });
+      return;
+    }
+
+    if (request.method() === "POST" && request.url().includes("revenue-session")) {
+      const params = new URLSearchParams(body);
+      revenueCalendarRequest = params;
+      expect(params.get("FLOW_MODE")).toBe("REVENUE");
+      expect(params.get("CFF_OUTBOUND")).toBe("1YE");
+      expect(params.get("DDS_FROM_PAGE")).toBe("ODCL");
+      expect(params.has("ENC")).toBe(false);
+      events.push("revenue-calendar");
       await route.fulfill({
         status: 200,
         contentType: "text/html",
@@ -145,6 +162,9 @@ test("preflights revenue auth, completes it in the background, then loads award 
   });
 
   expect(events.indexOf("revenue-bootstrap")).toBeGreaterThan(-1);
+  expect(events.indexOf("revenue-calendar")).toBeGreaterThan(
+    events.indexOf("revenue-bootstrap")
+  );
   expect(events.findIndex((event) => event.startsWith("award-"))).toBeGreaterThan(
     events.indexOf("revenue-bootstrap")
   );
@@ -219,12 +239,14 @@ test("preflights revenue auth, completes it in the background, then loads award 
   expect(freshAwardBootstrap?.has("CFF_OUTBOUND")).toBe(false);
   expect(revenueBootstrap?.has("CFF_OUTBOUND")).toBe(false);
   expect(awardSessionRequest).toBeDefined();
+  expect(revenueCalendarRequest).toBeDefined();
 
   await context.close();
 });
 
 test("surfaces JAL's exact OTP page when revenue authentication needs interaction", async ({}, testInfo) => {
   let awardRequests = 0;
+  let fallbackFinishedAt = 0;
   const { context, serviceWorker } = await launchExtension(testInfo.outputPath("profile"));
   await addBookingToken(context);
 
@@ -249,6 +271,7 @@ test("surfaces JAL's exact OTP page when revenue authentication needs interactio
       if (request.method() === "POST") {
         expect(new URLSearchParams(request.postData() || "").get("FLOW_MODE")).toBe("REVENUE");
         await new Promise((resolve) => setTimeout(resolve, 1_000));
+        fallbackFinishedAt = Date.now();
         await route.fulfill({
           status: 200,
           contentType: "text/html",
@@ -301,13 +324,17 @@ test("surfaces JAL's exact OTP page when revenue authentication needs interactio
   expect(awardRequests).toBe(0);
 
   const otpPage = context.pages().find((page) => page.url() === otpUrl)!;
+  let tempPageClosedAt = 0;
+  otpPage.once("close", () => {
+    tempPageClosedAt = Date.now();
+  });
   await otpPage.goto(otpRevenueUrl);
-  await expect(otpPage.locator(".jal-helper-panel summary")).toHaveText(
-    "NYC-TYO · Sep 9, 2026"
-  );
-  await expect(otpPage.locator(".jal-helper-status")).toHaveText("Finishing cash access…");
-  await expect(otpPage.locator(".jal-helper-status")).toHaveAttribute("data-loading", "true");
+  await expect(awardPage.locator(".jal-helper-status")).toHaveText("Fetching cash fares…");
   await expect(awardPage.locator(".jal-helper-price-row")).toHaveCount(3);
+  expect(tempPageClosedAt).toBeGreaterThan(0);
+  expect(fallbackFinishedAt).toBeGreaterThan(0);
+  expect(tempPageClosedAt).toBeLessThan(fallbackFinishedAt);
+  await expect(awardPage.locator(".jal-helper-status")).toHaveText("Fares ready.");
 
   await context.close();
 });

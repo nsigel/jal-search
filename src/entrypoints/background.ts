@@ -4,7 +4,6 @@ import {
   REVENUE_AUTH_KEY,
   REVENUE_SESSION_KEY,
   REVENUE_STATUS_KEY,
-  PriceMap,
   RevenueProbeResult,
   RevenueSearch,
   RevenueSession,
@@ -27,7 +26,6 @@ type PendingAuth = {
 
 type RevenuePage = {
   session: RevenueSession;
-  prices: PriceMap;
 };
 
 let closingTab: number | undefined;
@@ -162,28 +160,42 @@ async function completeAuth(message: RevenuePage, tabId?: number) {
     !message.session?.sessionId
   ) return;
 
+  const authTabId = auth.authTabId;
+  closingTab = authTabId;
+  await browser.tabs.remove(authTabId).catch(() => undefined);
+  await browser.tabs.update(auth.awardTabId, { active: true }).catch(() => undefined);
+  await setStatus("fetching", "Fetching cash fares from JAL…");
+  await browser.tabs.sendMessage(auth.awardTabId, {
+    type: "jal:revenue-fetching"
+  }).catch(() => undefined);
+
   try {
-    const result = await finishRevenue(message, auth.search);
+    const result = await fetchRevenue(message.session, auth.search);
+    const current = await getAuth();
+    if (!current || current.id !== auth.id) return;
+    await browser.storage.local.set({ [REVENUE_SESSION_KEY]: result.session });
     await browser.storage.session.remove(REVENUE_AUTH_KEY);
     await setStatus("ready", "Cash-fare access is ready.");
     await browser.tabs.sendMessage(auth.awardTabId, {
       type: "jal:revenue-ready",
       prices: result.prices
     }).catch(() => undefined);
-    closingTab = auth.authTabId;
-    await browser.tabs.remove(auth.authTabId);
-    await browser.tabs.update(auth.awardTabId, { active: true }).catch(() => undefined);
   } catch (error) {
-    await failAuth(error instanceof Error ? error.message : String(error));
+    const current = await getAuth();
+    if (current?.id === auth.id) {
+      await failAuth(error instanceof Error ? error.message : String(error));
+    }
   }
 }
 
-async function finishRevenue(message: RevenuePage, search: RevenueSearch): Promise<RevenuePage> {
-  const result = Object.keys(message.prices).length
-    ? message
-    : await enqueue(() => fetchRevenueCalendar(message.session, search));
+async function finishRevenue(message: RevenuePage, search: RevenueSearch) {
+  const result = await fetchRevenue(message.session, search);
   await browser.storage.local.set({ [REVENUE_SESSION_KEY]: result.session });
   return result;
+}
+
+function fetchRevenue(session: RevenueSession, search: RevenueSearch) {
+  return enqueue(() => fetchRevenueCalendar(session, search));
 }
 
 async function fetchRevenueCalendar(session: RevenueSession, search: RevenueSearch) {

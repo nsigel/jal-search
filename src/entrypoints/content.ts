@@ -52,7 +52,7 @@ export default defineContentScript({
     if (isRevenue(data)) {
       const revenueSearch = extractSearch(data);
       mountPanel(revenueSearch, await recentSearches());
-      setPanelStatus("Finishing cash access…", true);
+      setPanelStatus("Cash session received; fetching fares…", true);
       await reportRevenuePage(data);
       setPanelStatus("Cash access ready.", false);
       return;
@@ -109,6 +109,10 @@ function registerRuntimeMessages() {
       setPanelStatus(message.message || "Cash-fare authentication failed.", false, true);
       return;
     }
+    if (message.type === "jal:revenue-fetching") {
+      if (context) setPanelStatus("Fetching cash fares…", true);
+      return;
+    }
     if (message.type !== "jal:revenue-ready" || !message.prices || !context) return;
     const enabled = (await browser.storage.local.get(COMPARE_CASH_KEY))[COMPARE_CASH_KEY] !== false;
     if (!enabled) return;
@@ -163,8 +167,7 @@ async function probeRevenue(id: string, search: RevenueSearch): Promise<RevenueP
     }
     finish({
       status: "ready",
-      session: { sessionId: data.jsessionid, params: jalParams(data) },
-      prices: parsePrices(data)
+      session: { sessionId: data.jsessionid, params: jalParams(data) }
     });
   };
 
@@ -242,9 +245,8 @@ async function reportRevenuePage(data: JalData) {
   if (!data.jsessionid) return;
   await browser.runtime.sendMessage({
     type: "jal:revenue-page-ready",
-    session: { sessionId: data.jsessionid, params: jalParams(data) },
-    prices: parsePrices(data)
-  });
+    session: { sessionId: data.jsessionid, params: jalParams(data) }
+  }).catch(() => undefined);
 }
 
 async function compare(search: SearchContext) {

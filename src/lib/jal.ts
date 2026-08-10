@@ -16,7 +16,7 @@ export type RevenueSession = {
 };
 
 export type RevenueProbeResult =
-  | { status: "ready"; session: RevenueSession; prices: PriceMap }
+  | { status: "ready"; session: RevenueSession }
   | { status: "auth-required" }
   | { status: "cancelled" }
   | { status: "error"; message: string };
