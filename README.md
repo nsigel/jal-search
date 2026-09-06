@@ -2,9 +2,7 @@
 
 A Chrome extension that adds award and cash prices to JAL award calendars.
 
-![JAL international award ticket search page](docs/screenshots/jal-award-page.jpg)
-
-![JAL Award Helper popup](docs/screenshots/popup.png)
+![JAL international award calendar](<img width="818" height="865" alt="image" src="https://github.com/user-attachments/assets/1067baf8-7fa3-4633-9fa9-e3d6f03a1224" />)
 
 ## Install
 
